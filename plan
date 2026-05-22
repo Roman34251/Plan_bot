@@ -79,7 +79,7 @@ def format_task_line(task: dict, date_str: str, index: int) -> str:
     elif is_missed_for_date(task, date_str):
         status = "❌"
     else:
-        status = "⬜"
+        status = "⚪️"
 
     time_part = f" 🕐 {task['due_time']}" if task.get("due_time") else ""
     repeat_part = " 🔁" if task.get("repeat", {}).get("enabled") else ""
@@ -126,67 +126,114 @@ def build_repeat_keyboard(selected: list[int]) -> InlineKeyboardMarkup:
         row.append(InlineKeyboardButton(f"{mark}{name}", callback_data=f"wd:{i}"))
     buttons = [row[:4], row[4:]]
     buttons.append([
-        InlineKeyboardButton("✅ Готово", callback_data="wd:done"),
+        InlineKeyboardButton("✅  Готово", callback_data="wd:done"),
         InlineKeyboardButton("❌ Без повтору", callback_data="wd:skip"),
     ])
     return InlineKeyboardMarkup(buttons)
+
 
 
 # ─── /plan ──────────────────────────────────────────────────────────────────
 
 @only_me
 async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    msg = update.message
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 Сьогодні", callback_data="plan:today")],
+        [InlineKeyboardButton("📋 Весь список", callback_data="plan:all")],
+        [InlineKeyboardButton("🗓 Обрати дату", callback_data="plan:pick_date")]
+    ])
 
-    if args and args[0] == "all":
-        tasks = load_tasks()
+    await update.message.reply_text(
+        "📋 Обери режим перегляду плану:",
+        reply_markup=keyboard
+    )
+
+async def plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    # ─── СЬОГОДНІ ─────────────────────
+    if data == "plan:today":
+        date_str = today_str()
+        tasks = get_tasks_for_date(date_str)
+
         if not tasks:
-            await msg.reply_text("Список задач порожній.")
+            await query.edit_message_text("📭 На сьогодні задач немає")
             return
-        lines = ["📋 *Усі задачі:*\n"]
-        for i, t in enumerate(tasks, 1):
-            repeat = t.get("repeat", {})
-            rep_str = ""
-            if repeat.get("enabled"):
-                days = ", ".join(WEEKDAY_NAMES[d] for d in repeat.get("weekdays", []))
-                rep_str = f" 🔁 ({days} до {repeat.get('until', '?')})"
-            time_str = f" 🕐 {t['due_time']}" if t.get("due_time") else ""
-            date_str = t.get("due_date", "—")
-            active = "" if t.get("active", True) else " [неактивна]"
-            lines.append(f"{i}. {t['text']}{time_str} — {date_str}{rep_str}{active}")
-        await msg.reply_text("\n".join(lines), parse_mode="Markdown")
+
+        text = "📋 Сьогоднішній план:\n\n"
+        text += "\n".join([
+            format_task_line(t, date_str, i+1)
+            for i, t in enumerate(tasks)
+        ])
+
+        await query.edit_message_text(text)
         return
 
-    # Вибір дати
-    if args:
-        try:
-            target_date = datetime.strptime(args[0], "%Y-%m-%d").strftime("%Y-%m-%d")
-        except ValueError:
-            await msg.reply_text("Формат дати: YYYY-MM-DD або /plan all")
+    # ─── ВСІ ЗАДАЧІ ───────────────────
+    if data == "plan:all":
+        tasks = load_tasks()
+
+        if not tasks:
+            await query.edit_message_text("📭 Список порожній")
             return
-    else:
-        target_date = today_str()
 
-    tasks = get_tasks_for_date(target_date)
-    dt = datetime.strptime(target_date, "%Y-%m-%d")
-    date_label = f"{dt.day} {['січня','лютого','березня','квітня','травня','червня','липня','серпня','вересня','жовтня','листопада','грудня'][dt.month-1]}, {WEEKDAY_NAMES_FULL[dt.weekday()]}"
+        # ─── групування по датах ───
+        grouped = {}
 
-    if not tasks:
-        await msg.reply_text(
-            f"📋 На *{date_label}* задач немає.\nДодай командою /add",
-            parse_mode="Markdown"
+        for t in tasks:
+            date_key = t.get("due_date", "—")
+            grouped.setdefault(date_key, []).append(t)
+
+        # ─── сортуємо дати ───
+        sorted_dates = sorted(grouped.keys())
+
+        text = "📋 Календар задач:\n\n"
+
+        for date_str in sorted_dates:
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                label = f"{dt.day:02d}.{dt.month:02d}"
+            except:
+                label = date_str
+
+            text += f"📅 {label}\n"
+
+            for i, task in enumerate(grouped[date_str], 1):
+                text += "   " + format_task_line(task, date_str, i) + "\n"
+
+            text += "\n"
+
+        await query.edit_message_text(text)
+        return
+
+    # ─── ВИБІР ДАТИ ───────────────────
+    if data == "plan:pick_date":
+        await query.edit_message_text(
+            "🗓 Обери дату:",
+            reply_markup=build_date_keyboard()
         )
         return
 
-    lines = [f"📋 *План на {date_label}:*\n"]
-    for i, t in enumerate(tasks, 1):
-        lines.append(format_task_line(t, target_date, i))
+    # ─── КОНКРЕТНА ДАТА ───────────────
+    if data.startswith("date:"):
+        date_str = data.split(":", 1)[1]
+        tasks = get_tasks_for_date(date_str)
 
-    done = sum(1 for t in tasks if is_done_for_date(t, target_date))
-    lines.append(f"\n_{done}/{len(tasks)} виконано_")
-    await msg.reply_text("\n".join(lines), parse_mode="Markdown")
+        if not tasks:
+            await query.edit_message_text(f"📭 Нема задач на {date_str}")
+            return
 
+        text = f"📋 План на {date_str}\n\n"
+        text += "\n".join([
+            format_task_line(t, date_str, i+1)
+            for i, t in enumerate(tasks)
+        ])
+
+        await query.edit_message_text(text)
+        return
 
 # ─── /add (ConversationHandler) ─────────────────────────────────────────────
 
@@ -519,6 +566,8 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     script = os.path.abspath(__file__)
     subprocess.Popen([sys.executable, script])
     os._exit(0)
+    await update.message.reply_text("🧹 Стан бота оновлено.")
+
 # ─── /clear ─────────────────────────────────────────────────────────────────
 
 @only_me
@@ -698,6 +747,7 @@ def main():
     app.add_handler(CommandHandler("restart", cmd_restart))
 
     # ✅ Нові callback-хендлери
+    app.add_handler(CallbackQueryHandler(plan_callback, pattern=r"^plan|^date:"))
     app.add_handler(CallbackQueryHandler(callback_done_toggle, pattern=r"^done_toggle:"))
     app.add_handler(CallbackQueryHandler(callback_done_noop, pattern=r"^done_noop:"))
     app.add_handler(CallbackQueryHandler(callback_done_refresh, pattern=r"^done_refresh$"))
