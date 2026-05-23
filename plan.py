@@ -38,19 +38,15 @@ TOKEN = os.getenv("BOT_TOKEN")
 MY_CHAT_ID = int(os.getenv("MY_CHAT_ID"))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Kiev")
 
-# ─── ConversationHandler стани ─────────────────────────────────────────────
 STEP_TEXT = 1
 STEP_DATE = 2
 STEP_TIME = 3
 STEP_REPEAT = 4
-
 STEP_REMOVE_PICK = 10
 
 WEEKDAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
 WEEKDAY_NAMES_FULL = ["понеділок", "вівторок", "середу", "четвер", "п'ятницю", "суботу", "неділю"]
 
-
-# ─── Guard ──────────────────────────────────────────────────────────────────
 
 def only_me(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -62,8 +58,6 @@ def only_me(func):
         return await func(update, context)
     return wrapper
 
-
-# ─── Helpers ────────────────────────────────────────────────────────────────
 
 def today_str() -> str:
     return datetime.now(ZoneInfo(TIMEZONE)).strftime("%Y-%m-%d")
@@ -80,14 +74,23 @@ def format_task_line(task: dict, date_str: str, index: int) -> str:
         status = "❌"
     else:
         status = "⚪️"
-
+ 
     time_part = f" 🕐 {task['due_time']}" if task.get("due_time") else ""
-    repeat_part = " 🔁" if task.get("repeat", {}).get("enabled") else ""
+ 
+    repeat = task.get("repeat", {})
+    if repeat.get("enabled"):
+        weekdays = repeat.get("weekdays", [])
+        if weekdays:
+            days_str = ", ".join(WEEKDAY_NAMES[d] for d in sorted(weekdays))
+            repeat_part = f" 🔁 {days_str}"
+        else:
+            repeat_part = " 🔁"
+    else:
+        repeat_part = ""
+ 
     return f"{status} {index}. {task['text']}{time_part}{repeat_part}"
 
-
 def build_date_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки на 30 днів вперед, по 7 в рядку."""
     tz = ZoneInfo(TIMEZONE)
     today = datetime.now(tz).date()
     buttons = []
@@ -105,7 +108,7 @@ def build_date_keyboard() -> InlineKeyboardMarkup:
 
 
 def build_time_keyboard() -> InlineKeyboardMarkup:
-    hours = [5, 6, 7, 8, 9, 10, 11, 12,  13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    hours = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
     buttons = []
     row = []
     for h in hours:
@@ -132,7 +135,6 @@ def build_repeat_keyboard(selected: list[int]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-
 # ─── /plan ──────────────────────────────────────────────────────────────────
 
 @only_me
@@ -142,7 +144,6 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 Весь список", callback_data="plan:all")],
         [InlineKeyboardButton("🗓 Обрати дату", callback_data="plan:pick_date")]
     ])
-
     await update.message.reply_text(
         "📋 Обери режим перегляду плану:",
         reply_markup=keyboard
@@ -151,7 +152,6 @@ async def cmd_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     data = query.data
 
     # ─── СЬОГОДНІ ─────────────────────
@@ -168,7 +168,6 @@ async def plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             format_task_line(t, date_str, i+1)
             for i, t in enumerate(tasks)
         ])
-
         await query.edit_message_text(text)
         return
 
@@ -180,33 +179,65 @@ async def plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("📭 Список порожній")
             return
 
-        # ─── групування по датах ───
-        grouped = {}
+        # Розділяємо на звичайні і повторювані
+        regular = [t for t in tasks if not t.get("repeat", {}).get("enabled")]
+        repeating = [t for t in tasks if t.get("repeat", {}).get("enabled")]
 
-        for t in tasks:
-            date_key = t.get("due_date", "—")
-            grouped.setdefault(date_key, []).append(t)
+        text = "📋 *Календар задач:*\n\n"
 
-        # ─── сортуємо дати ───
-        sorted_dates = sorted(grouped.keys())
+        # ─── Звичайні — по датах ───
+        if regular:
+            grouped = {}
+            for t in regular:
+                date_key = t.get("due_date", "—")
+                grouped.setdefault(date_key, []).append(t)
 
-        text = "📋 Календар задач:\n\n"
+            for date_str in sorted(grouped.keys()):
+                try:
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+                    label = f"{dt.day:02d}.{dt.month:02d} {WEEKDAY_NAMES[dt.weekday()]}"
+                except Exception:
+                    label = date_str
 
-        for date_str in sorted_dates:
-            try:
-                dt = datetime.strptime(date_str, "%Y-%m-%d")
-                label = f"{dt.day:02d}.{dt.month:02d}"
-            except:
-                label = date_str
+                text += f"📅 {label}\n"
+                for i, task in enumerate(grouped[date_str], 1):
+                    text += "   " + format_task_line(task, date_str, i) + "\n"
+                text += "\n"
 
-            text += f"📅 {label}\n"
+        # ─── Повторювані — окремим блоком з деталями ───
+        if repeating:
+            text += "🔁 *Повторювані задачі:*\n\n"
+            for t in repeating:
+                repeat = t.get("repeat", {})
+                weekdays = repeat.get("weekdays", [])
+                until = repeat.get("until", "—")
+                due_date = t.get("due_date", "—")
+                due_time = t.get("due_time")
 
-            for i, task in enumerate(grouped[date_str], 1):
-                text += "   " + format_task_line(task, date_str, i) + "\n"
+                days_str = ", ".join(WEEKDAY_NAMES[d] for d in sorted(weekdays)) if weekdays else "щодня"
 
-            text += "\n"
+                try:
+                    until_dt = datetime.strptime(until, "%Y-%m-%d")
+                    until_label = f"{until_dt.day:02d}.{until_dt.month:02d}.{until_dt.year}"
+                except Exception:
+                    until_label = until
 
-        await query.edit_message_text(text)
+                try:
+                    due_dt = datetime.strptime(due_date, "%Y-%m-%d")
+                    due_label = f"{due_dt.day:02d}.{due_dt.month:02d}"
+                except Exception:
+                    due_label = due_date
+
+                time_str = f" 🕐 {due_time}" if due_time else ""
+                status = "✅" if is_done_for_date(t, today_str()) else "⚪️"
+
+                text += (
+                    f"{status} *{t['text']}*{time_str}\n"
+                    f"   📅 Початок: {due_label}  •  📆 {days_str}\n"
+                    f"   ⏳ До: {until_label}\n\n"
+                )
+
+        await query.edit_message_text(text, parse_mode="Markdown")
         return
 
     # ─── ВИБІР ДАТИ ───────────────────
@@ -231,11 +262,11 @@ async def plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             format_task_line(t, date_str, i+1)
             for i, t in enumerate(tasks)
         ])
-
         await query.edit_message_text(text)
         return
 
-# ─── /add (ConversationHandler) ─────────────────────────────────────────────
+
+# ─── /add ───────────────────────────────────────────────────────────────────
 
 @only_me
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -273,12 +304,7 @@ async def step_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     val = query.data.split(":", 1)[1]
-
-    if val == "skip":
-        context.user_data["due_time"] = None
-    else:
-        context.user_data["due_time"] = val
-
+    context.user_data["due_time"] = None if val == "skip" else val
     context.user_data["repeat_weekdays"] = []
     await query.edit_message_text(
         "🔁 Повторювати щотижня? Вибери дні або пропусти:",
@@ -288,7 +314,6 @@ async def step_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def step_repeat_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Тоггл днів тижня для повтору."""
     query = update.callback_query
     await query.answer()
     val = query.data.split(":", 1)[1]
@@ -353,7 +378,7 @@ async def _finish_add(query, context, repeat_enabled: bool):
     )
 
 
-# ─── /done з кнопками ───────────────────────────────────────────────────────
+# ─── /done ──────────────────────────────────────────────────────────────────
 
 @only_me
 async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -364,12 +389,10 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("На сьогодні задач немає.")
         return
 
-    # Якщо передали числа через пробіл: /done або відповідь "3 5 1"
     if context.args:
         await _done_by_numbers(update, context, tasks, target_date, context.args)
         return
 
-    # Інакше — показуємо inline-кнопки
     await update.message.reply_text(
         "✅ *Вибери виконані задачі:*",
         parse_mode="Markdown",
@@ -378,7 +401,6 @@ async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _done_by_numbers(update, context, tasks, target_date, args):
-    """Відмічає кілька задач за номерами: /done 1 3 5"""
     results = []
     for arg in args:
         try:
@@ -392,42 +414,32 @@ async def _done_by_numbers(update, context, tasks, target_date, args):
                 results.append(f"✅ #{idx+1} {task['text']}")
         except (ValueError, IndexError):
             results.append(f"❌ #{arg} — невірний номер")
-
     await update.message.reply_text("\n".join(results), parse_mode="Markdown")
 
 
 def build_done_keyboard(tasks: list, date_str: str) -> InlineKeyboardMarkup:
-    """Кнопка на кожну невиконану задачу."""
     buttons = []
     for i, t in enumerate(tasks, 1):
         if is_done_for_date(t, date_str):
-            # Вже виконана — показуємо сірою із галочкою, але некликабельна
             label = f"✅ {i}. {t['text']}"
             cb = f"done_noop:{t['id']}"
         else:
             label = f"⬜ {i}. {t['text']}"
             cb = f"done_toggle:{t['id']}"
         buttons.append([InlineKeyboardButton(label, callback_data=cb)])
-
     buttons.append([InlineKeyboardButton("🔄 Оновити список", callback_data="done_refresh")])
     return InlineKeyboardMarkup(buttons)
 
 
 async def callback_done_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Натискання на задачу → відмічає виконаною і оновлює кнопки."""
     query = update.callback_query
     await query.answer()
-
     task_id = query.data.split(":", 1)[1]
     target_date = today_str()
-
     mark_done_for_date(task_id, target_date)
     record_stat(target_date, done=1)
-
-    # Оновлюємо список кнопок
     tasks = get_tasks_for_date(target_date)
     done_count = sum(1 for t in tasks if is_done_for_date(t, target_date))
-
     await query.edit_message_text(
         f"✅ *Виконані задачі ({done_count}/{len(tasks)}):*",
         parse_mode="Markdown",
@@ -441,7 +453,6 @@ async def callback_done_refresh(update: Update, context: ContextTypes.DEFAULT_TY
     target_date = today_str()
     tasks = get_tasks_for_date(target_date)
     done_count = sum(1 for t in tasks if is_done_for_date(t, target_date))
-
     await query.edit_message_text(
         f"✅ *Виконані задачі ({done_count}/{len(tasks)}):*",
         parse_mode="Markdown",
@@ -450,11 +461,11 @@ async def callback_done_refresh(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def callback_done_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Клік на вже виконану задачу — просто показує підказку."""
     query = update.callback_query
     await query.answer("Вже виконана ✅")
 
-# ─── /remove з кнопками ─────────────────────────────────────────────────────
+
+# ─── /remove ────────────────────────────────────────────────────────────────
 
 @only_me
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -463,7 +474,6 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Список порожній.")
         return
 
-    # Якщо передали числа: /remove 2 4
     if context.args:
         await _remove_by_numbers(update, context, tasks, context.args)
         return
@@ -476,8 +486,6 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _remove_by_numbers(update, context, tasks, args):
-    """Видаляє кілька задач за номерами: /remove 1 3"""
-    # Сортуємо в зворотньому порядку щоб індекси не зсувались
     indices = sorted(set(int(a) - 1 for a in args if a.isdigit()), reverse=True)
     results = []
     for idx in indices:
@@ -486,7 +494,6 @@ async def _remove_by_numbers(update, context, tasks, args):
             results.append(f"🗑 Видалено: *{removed['text']}*")
         except IndexError:
             results.append(f"❌ #{idx+1} — невірний номер")
-
     await update.message.reply_text("\n".join(results), parse_mode="Markdown")
 
 
@@ -496,7 +503,6 @@ def build_remove_keyboard(tasks: list) -> InlineKeyboardMarkup:
         date_str = t.get("due_date", "—")
         label = f"🗑 {i}. {t['text']} ({date_str})"
         buttons.append([InlineKeyboardButton(label, callback_data=f"remove_task:{t['id']}")])
-
     buttons.append([InlineKeyboardButton("❌ Скасувати", callback_data="remove_cancel")])
     return InlineKeyboardMarkup(buttons)
 
@@ -504,15 +510,11 @@ def build_remove_keyboard(tasks: list) -> InlineKeyboardMarkup:
 async def callback_remove_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     task_id = query.data.split(":", 1)[1]
     removed = delete_task(task_id)
-
     if not removed:
         await query.edit_message_text("⚠️ Задачу вже видалено.")
         return
-
-    # Показуємо оновлений список — якщо ще є задачі
     tasks = load_tasks()
     if tasks:
         await query.edit_message_text(
@@ -531,6 +533,7 @@ async def callback_remove_cancel(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     await query.answer("Скасовано")
     await query.edit_message_text("❌ Видалення скасовано.")
+
 
 # ─── /stats ─────────────────────────────────────────────────────────────────
 
@@ -559,14 +562,15 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
-# ─── /restart ─────────────────────────────────────────────────────────────────
+# ─── /restart ───────────────────────────────────────────────────────────────
+
 @only_me
 async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Перезапускаю бота...")
     script = os.path.abspath(__file__)
     subprocess.Popen([sys.executable, script])
     os._exit(0)
-    await update.message.reply_text("🧹 Стан бота оновлено.")
+
 
 # ─── /clear ─────────────────────────────────────────────────────────────────
 
@@ -587,10 +591,8 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── SCHEDULER JOBS ─────────────────────────────────────────────────────────
 
 async def job_deactivate_missed(context: ContextTypes.DEFAULT_TYPE):
-    """О 00:00 — деактивує прострочені звичайні задачі, записує missed в статистику."""
     tz = ZoneInfo(TIMEZONE)
     yesterday = (datetime.now(tz).date() - timedelta(days=1)).isoformat()
-
     tasks = load_tasks()
     changed = False
     for t in tasks:
@@ -598,7 +600,6 @@ async def job_deactivate_missed(context: ContextTypes.DEFAULT_TYPE):
             continue
         repeat = t.get("repeat", {})
         if repeat.get("enabled"):
-            # Для повторюваних — перевіряємо чи вчора був їхній день
             try:
                 yd = datetime.strptime(yesterday, "%Y-%m-%d").date()
             except ValueError:
@@ -609,21 +610,18 @@ async def job_deactivate_missed(context: ContextTypes.DEFAULT_TYPE):
                     record_stat(yesterday, missed=1)
                     changed = True
         else:
-            # Звичайна задача — якщо due_date == yesterday і не виконана
             if t.get("due_date") == yesterday:
                 if yesterday not in t.get("done_dates", []):
                     t.setdefault("missed_dates", []).append(yesterday)
                     record_stat(yesterday, missed=1)
                 t["active"] = False
                 changed = True
-
     if changed:
         save_tasks(tasks)
     logger.info("job_deactivate_missed done for %s", yesterday)
 
 
 async def job_morning_plan(context: ContextTypes.DEFAULT_TYPE):
-    """О 09:00 — надсилає план на сьогодні."""
     today = today_str()
     tasks = get_tasks_for_date(today)
     dt = datetime.strptime(today, "%Y-%m-%d")
@@ -649,12 +647,10 @@ async def job_morning_plan(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def job_reminders(context: ContextTypes.DEFAULT_TYPE):
-    """Кожну хвилину — перевіряє задачі з due_time і надсилає нагадування за 5 хв."""
     tz = ZoneInfo(TIMEZONE)
     now = datetime.now(tz)
     remind_time = (now + timedelta(minutes=5)).strftime("%H:%M")
     today = now.strftime("%Y-%m-%d")
-
     tasks = get_tasks_for_date(today)
     for t in tasks:
         if t.get("due_time") == remind_time and not is_done_for_date(t, today):
@@ -666,7 +662,6 @@ async def job_reminders(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def job_weekly_report(context: ContextTypes.DEFAULT_TYPE):
-    """Щонеділі о 20:00 — звіт за тиждень."""
     tz = ZoneInfo(TIMEZONE)
     today = datetime.now(tz).date()
     week_dates = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
@@ -686,7 +681,6 @@ async def job_weekly_report(context: ContextTypes.DEFAULT_TYPE):
         label = f"{dt.day:02d}.{dt.month:02d} {WEEKDAY_NAMES[dt.weekday()]}"
         lines.append(f"`{label}` {bar or '—'} ✅{done} ❌{missed}")
 
-    # Знаходимо пропущені задачі за тиждень
     all_tasks = load_tasks()
     for t in all_tasks:
         for d in week_dates:
@@ -713,20 +707,18 @@ async def job_weekly_report(context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application: Application):
     tz = ZoneInfo(TIMEZONE)
     scheduler = AsyncIOScheduler(timezone=tz)
-
     scheduler.add_job(job_morning_plan, "cron", hour=9, minute=0, args=[application])
     scheduler.add_job(job_deactivate_missed, "cron", hour=0, minute=0, args=[application])
     scheduler.add_job(job_reminders, "cron", minute="*", args=[application])
     scheduler.add_job(job_weekly_report, "cron", day_of_week="sun", hour=20, minute=0, args=[application])
-
     scheduler.start()
     application.bot_data["scheduler"] = scheduler
     logger.info("Scheduler started")
 
+
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
-    # ConversationHandler для /add (без змін)
     conv_add = ConversationHandler(
         entry_points=[CommandHandler("add", cmd_add)],
         states={
@@ -746,7 +738,6 @@ def main():
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("restart", cmd_restart))
 
-    # ✅ Нові callback-хендлери
     app.add_handler(CallbackQueryHandler(plan_callback, pattern=r"^plan|^date:"))
     app.add_handler(CallbackQueryHandler(callback_done_toggle, pattern=r"^done_toggle:"))
     app.add_handler(CallbackQueryHandler(callback_done_noop, pattern=r"^done_noop:"))
@@ -756,6 +747,7 @@ def main():
 
     logger.info("Bot started")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()

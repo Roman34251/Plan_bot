@@ -28,7 +28,6 @@ def get_task_by_id(task_id: str) -> dict | None:
 
 
 def update_task(task_id: str, fields: dict) -> bool:
-    """Оновлює конкретні поля задачі за id. Повертає True якщо знайдено."""
     tasks = load_tasks()
     for t in tasks:
         if t["id"] == task_id:
@@ -39,7 +38,6 @@ def update_task(task_id: str, fields: dict) -> bool:
 
 
 def delete_task(task_id: str) -> dict | None:
-    """Видаляє задачу за id. Повертає видалену задачу або None."""
     tasks = load_tasks()
     for i, t in enumerate(tasks):
         if t["id"] == task_id:
@@ -52,8 +50,9 @@ def delete_task(task_id: str) -> dict | None:
 def get_tasks_for_date(date_str: str) -> list[dict]:
     """
     Повертає всі задачі для конкретної дати.
-    Враховує звичайні задачі (due_date == date_str)
-    і повторювані (weekday збігається і дата в межах until).
+    - Звичайні: due_date == date_str
+    - Повторювані: weekday збігається і target >= due_date і в межах until
+      (день створення due_date НЕ показується — лише дні повтору)
     """
     tasks = load_tasks()
     result = []
@@ -69,15 +68,28 @@ def get_tasks_for_date(date_str: str) -> list[dict]:
         repeat = t.get("repeat", {})
 
         if repeat.get("enabled"):
-            # Перевіряємо чи дата в межах until
+            # Перевіряємо межу until
             until_str = repeat.get("until")
             if until_str:
                 until = datetime.strptime(until_str, "%Y-%m-%d").date()
                 if target > until:
                     continue
-            # Перевіряємо чи weekday збігається (0=пн .. 6=нд)
-            if target.weekday() in repeat.get("weekdays", []):
-                result.append(t)
+
+            # Перевіряємо що дата не раніше due_date
+            due_date_str = t.get("due_date")
+            if due_date_str:
+                try:
+                    due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
+                except ValueError:
+                    due_date = None
+
+                # Показуємо лише починаючи з due_date, і лише у дні повтору
+                if due_date and target >= due_date:
+                    if target.weekday() in repeat.get("weekdays", []):
+                        result.append(t)
+            else:
+                if target.weekday() in repeat.get("weekdays", []):
+                    result.append(t)
         else:
             if t.get("due_date") == date_str:
                 result.append(t)
@@ -86,7 +98,6 @@ def get_tasks_for_date(date_str: str) -> list[dict]:
 
 
 def mark_done_for_date(task_id: str, date_str: str) -> bool:
-    """Позначає задачу як виконану для конкретної дати."""
     tasks = load_tasks()
     for t in tasks:
         if t["id"] == task_id:
@@ -99,7 +110,6 @@ def mark_done_for_date(task_id: str, date_str: str) -> bool:
 
 
 def mark_missed_for_date(task_id: str, date_str: str) -> bool:
-    """Позначає задачу як пропущену для конкретної дати."""
     tasks = load_tasks()
     for t in tasks:
         if t["id"] == task_id:
@@ -122,13 +132,6 @@ def is_missed_for_date(task: dict, date_str: str) -> bool:
 # ─── STATS ────────────────────────────────────────────────────────────────────
 
 def load_stats() -> dict:
-    """
-    Структура:
-    {
-      "2025-05-22": {"done": 3, "missed": 1},
-      ...
-    }
-    """
     if not os.path.exists(STATS_FILE):
         return {}
     with open(STATS_FILE, "r", encoding="utf-8") as f:
@@ -144,7 +147,6 @@ def save_stats(stats: dict) -> None:
 
 
 def record_stat(date_str: str, done: int = 0, missed: int = 0) -> None:
-    """Додає до статистики за дату."""
     stats = load_stats()
     day = stats.setdefault(date_str, {"done": 0, "missed": 0})
     day["done"] += done
@@ -153,6 +155,5 @@ def record_stat(date_str: str, done: int = 0, missed: int = 0) -> None:
 
 
 def get_week_stats(week_dates: list[str]) -> dict:
-    """Повертає статистику за список дат."""
     stats = load_stats()
     return {d: stats.get(d, {"done": 0, "missed": 0}) for d in week_dates}
